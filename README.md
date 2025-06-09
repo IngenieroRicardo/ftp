@@ -32,62 +32,34 @@ Compilada usando: `go build -o ftp.dll -buildmode=c-shared ftp.go`
 int main() {
     // 1. Ejemplo de escritura binaria desde base64
     char* base64Data = "SGVsbG8gV29ybGQh"; // "Hello World!" en base64
-    char* binaryPath = "./salida.bin";
+    char* binaryPath = "ftp://usuario:password@127.0.0.1:21/ruta/salida.bin";
 
-    if (WBftp(base64Data, binaryPath) == 0) {
+    if (PutFTPFile(base64Data, binaryPath) == 0) {
         printf("Archivo binario creado: %s\n", binaryPath);
     }
 
     // 2. Ejemplo de escritura de texto
     char* textData = "Este es un texto de ejemplo\nSegunda línea";
-    char* textPath = "./salida.txt";
+    char* textPath = "ftp://usuario:password@127.0.0.1:21/ruta/salida.txt";
 
-    if (WTftp(textData, textPath) == 0) {
+    if (PutFTPText(textData, textPath) == 0) {
         printf("Archivo de texto creado: %s\n", textPath);
     }
 
     // 3. Ejemplo de lectura binaria (a base64)
-    char* base64Result = RBftp(binaryPath);
+    char* base64Result = GetFTPFile(binaryPath);
     if (base64Result != NULL) {
         printf("Base64 del archivo binario: %s\n", base64Result);
         free(base64Result);
     }
 
     // 4. Ejemplo de lectura de texto
-    char* textResult = RTftp(textPath);
+    char* textResult = GetFTPText(textPath);
     if (textResult != NULL) {
         printf("Contenido del archivo de texto:\n%s\n", textResult);
         free(textResult);
     }
 
-    return 0;
-}
-```
-
----
-
-### 🧪 Ejemplo de obtención de content-type
-
-```c
-#include <stdio.h>
-#include <stdlib.h>
-#include "ftp.h"
-
-int main() {
-    // Ejemplo con GetContentTypeFromBase64
-    char* imageBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z/C/HgAGgwJ/lK3Q6wAAAABJRU5ErkJggg=="; // PNG 1x1
-    char* contentType = GetContentTypeftp(imageBase64);
-    
-    printf("Content-Type: %s\n", contentType);
-    free(contentType);
-    
-    // Ejemplo con JSON
-    char* jsonBase64 = "ewogICJuYW1lIjogIkpvaG4gRG9lIiwKICAiYWdlIjogMzAKfQ=="; // {"name": "John Doe", "age": 30}
-    contentType = GetContentTypeftp(jsonBase64);
-    
-    printf("Content-Type: %s\n", contentType);
-    free(contentType);
-    
     return 0;
 }
 ```
