@@ -27,16 +27,12 @@ func GetFTPFile(ftpUrl *C.char) *C.char {
 	urlStr := C.GoString(ftpUrl)
 
 	if urlStr == "" {
-		return C.CString("Error: URL vacía")
+		return nil
 	}
 
 	u, err := url.Parse(urlStr)
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error analizando URL: %v", err))
-	}
-
-	if u.Scheme != "ftp" {
-		return C.CString("Error: El URL debe comenzar con ftp://")
+	if err != nil || u.Scheme != "ftp" {
+		return nil
 	}
 
 	user := u.User.Username()
@@ -49,94 +45,200 @@ func GetFTPFile(ftpUrl *C.char) *C.char {
 	}
 
 	if host == "" || user == "" {
-		return C.CString("Error: URL debe incluir host y usuario")
+		return nil
 	}
 
-	// Conexión con timeout
 	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Error conectando al servidor: %v", err))
+		return nil
 	}
 	defer conn.Close()
-
-	// Configurar deadline para operaciones
 	conn.SetDeadline(time.Now().Add(timeout))
 
 	var buf [1024]byte
 	n, err := conn.Read(buf[:])
 	if err != nil {
-		return C.CString(fmt.Sprintf("Error leyendo respuesta inicial: %v", err))
+		return nil
 	}
 
-	// Autenticación
-	if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-		return C.CString(fmt.Sprintf("Error enviando usuario: %v", err))
+	if _, err := fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+		return nil
 	}
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-		return C.CString("Error en autenticación de usuario")
-	}
-
-	if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-		return C.CString(fmt.Sprintf("Error enviando contraseña: %v", err))
-	}
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-		return C.CString("Error en autenticación de contraseña")
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+		return nil
 	}
 
-	// Configuración de transferencia
-	if _, err = fmt.Fprintf(conn, "TYPE I\r\n"); err != nil {
-		return C.CString(fmt.Sprintf("Error configurando modo binario: %v", err))
+	if _, err := fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(conn, "TYPE I\r\n"); err != nil {
+		return nil
 	}
 	conn.Read(buf[:])
 
-	// Modo pasivo
-	if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-		return C.CString(fmt.Sprintf("Error entrando en modo pasivo: %v", err))
+	if _, err := fmt.Fprintf(conn, "PASV\r\n"); err != nil {
+		return nil
 	}
-	if n, err = conn.Read(buf[:]); err != nil {
-		return C.CString(fmt.Sprintf("Error leyendo respuesta PASV: %v", err))
+	n, err = conn.Read(buf[:])
+	if err != nil {
+		return nil
 	}
 
 	pasvResp := string(buf[:n])
 	dataAddr, err := parsePASV(pasvResp)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Error analizando modo pasivo: %v", err))
+		return nil
 	}
 
 	dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Error conectando para datos: %v", err))
+		return nil
 	}
 	defer dataConn.Close()
 	dataConn.SetDeadline(time.Now().Add(timeout))
 
-	// Solicitar archivo
-	if _, err = fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
-		return C.CString(fmt.Sprintf("Error solicitando archivo: %v", err))
+	if _, err := fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
+		return nil
 	}
 
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-		return C.CString("Error iniciando transferencia de archivo")
-	}
-
-	// Leer con límite de tamaño
 	limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
 	var buffer bytes.Buffer
 
-	if _, err = io.Copy(&buffer, limitedReader); err != nil {
-		return C.CString(fmt.Sprintf("Error recibiendo datos: %v", err))
+	if _, err := io.Copy(&buffer, limitedReader); err != nil {
+		return nil
 	}
 
 	if limitedReader.N <= 0 {
-		return C.CString("Error: archivo excede el tamaño máximo permitido")
+		return nil
 	}
 
 	if buffer.Len() == 0 {
-		return C.CString("Advertencia: El archivo está vacío")
+		return nil
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(buffer.Bytes())
 	return C.CString(encoded)
+}
+
+//export GetFTPText
+func GetFTPText(ftpUrl *C.char) *C.char {
+	urlStr := C.GoString(ftpUrl)
+
+	if urlStr == "" {
+		return nil
+	}
+
+	u, err := url.Parse(urlStr)
+	if err != nil || u.Scheme != "ftp" {
+		return nil
+	}
+
+	user := u.User.Username()
+	pass, _ := u.User.Password()
+	host := u.Host
+	path := u.Path
+
+	if !strings.Contains(host, ":") {
+		host += ":21"
+	}
+
+	if host == "" || user == "" {
+		return nil
+	}
+
+	conn, err := net.DialTimeout("tcp", host, timeout)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(timeout))
+
+	var buf [1024]byte
+	n, err := conn.Read(buf[:])
+	if err != nil {
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
+		return nil
+	}
+	conn.Read(buf[:])
+
+	if _, err := fmt.Fprintf(conn, "PASV\r\n"); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil {
+		return nil
+	}
+
+	pasvResp := string(buf[:n])
+	dataAddr, err := parsePASV(pasvResp)
+	if err != nil {
+		return nil
+	}
+
+	dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
+	if err != nil {
+		return nil
+	}
+	defer dataConn.Close()
+	dataConn.SetDeadline(time.Now().Add(timeout))
+
+	if _, err := fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
+		return nil
+	}
+	n, err = conn.Read(buf[:])
+	if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
+		return nil
+	}
+
+	limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
+	var buffer bytes.Buffer
+
+	if _, err := io.Copy(&buffer, limitedReader); err != nil {
+		return nil
+	}
+
+	if limitedReader.N <= 0 {
+		return nil
+	}
+
+	if buffer.Len() == 0 {
+		return nil
+	}
+
+	text := buffer.String()
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimSpace(text)
+
+	return C.CString(text)
 }
 
 func parsePASV(resp string) (string, error) {
@@ -163,131 +265,546 @@ func parsePASV(resp string) (string, error) {
 	return fmt.Sprintf("%s:%d", ip, port), nil
 }
 
+//export PutFTPFile
+func PutFTPFile(base64Data, ftpUrl *C.char) C.int {
+    // Convertir C strings a Go strings
+    base64Str := C.GoString(base64Data)
+    urlStr := C.GoString(ftpUrl)
 
-//export GetFTPText
-func GetFTPText(ftpUrl *C.char) *C.char {
-	urlStr := C.GoString(ftpUrl)
+    // Validar entrada
+    if base64Str == "" {
+        return C.int(-1) // Error: Datos vacíos
+    }
 
-	if urlStr == "" {
-		return C.CString("Error: URL vacía")
-	}
+    if urlStr == "" {
+        return C.int(-2) // Error: URL vacía
+    }
 
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error analizando URL: %v", err))
-	}
+    // Decodificar base64
+    data, err := base64.StdEncoding.DecodeString(base64Str)
+    if err != nil {
+        return C.int(-3) // Error decodificando base64
+    }
 
-	if u.Scheme != "ftp" {
-		return C.CString("Error: El URL debe comenzar con ftp://")
-	}
+    // Parsear URL FTP
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return C.int(-4) // Error analizando URL
+    }
 
-	user := u.User.Username()
-	pass, _ := u.User.Password()
-	host := u.Host
-	path := u.Path
+    if u.Scheme != "ftp" {
+        return C.int(-5) // Error: URL no es FTP
+    }
 
-	if !strings.Contains(host, ":") {
-		host += ":21"
-	}
+    // Extraer credenciales y ruta
+    user := u.User.Username()
+    pass, _ := u.User.Password()
+    host := u.Host
+    path := u.Path
 
-	if host == "" || user == "" {
-		return C.CString("Error: URL debe incluir host y usuario")
-	}
+    if !strings.Contains(host, ":") {
+        host += ":21"
+    }
 
-	// Conexión con timeout
-	conn, err := net.DialTimeout("tcp", host, timeout)
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error conectando al servidor: %v", err))
-	}
-	defer conn.Close()
+    if host == "" || user == "" {
+        return C.int(-6) // Error: Falta host o usuario
+    }
 
-	// Configurar deadline para operaciones
-	conn.SetDeadline(time.Now().Add(timeout))
+    // Establecer conexión FTP
+    conn, err := net.DialTimeout("tcp", host, timeout)
+    if err != nil {
+        return C.int(-7) // Error de conexión
+    }
+    defer conn.Close()
+    conn.SetDeadline(time.Now().Add(timeout))
 
-	var buf [1024]byte
-	n, err := conn.Read(buf[:])
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error leyendo respuesta inicial: %v", err))
-	}
+    var buf [1024]byte
+    n, err := conn.Read(buf[:])
+    if err != nil {
+        return C.int(-8) // Error lectura inicial
+    }
 
-	// Autenticación
-	if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-		return C.CString(fmt.Sprintf("Error enviando usuario: %v", err))
-	}
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-		return C.CString("Error en autenticación de usuario")
-	}
+    // Autenticación
+    if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+        return C.int(-9) // Error enviando usuario
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+        return C.int(-10) // Error autenticación usuario
+    }
 
-	if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-		return C.CString(fmt.Sprintf("Error enviando contraseña: %v", err))
-	}
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-		return C.CString("Error en autenticación de contraseña")
-	}
+    if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+        return C.int(-11) // Error enviando contraseña
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+        return C.int(-12) // Error autenticación contraseña
+    }
 
-	// Configurar modo ASCII para archivos de texto
-	if _, err = fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
-		return C.CString(fmt.Sprintf("Error configurando modo ASCII: %v", err))
-	}
-	conn.Read(buf[:])
+    // Configurar modo binario
+    if _, err = fmt.Fprintf(conn, "TYPE I\r\n"); err != nil {
+        return C.int(-13) // Error configurando modo binario
+    }
+    conn.Read(buf[:])
 
-	// Modo pasivo
-	if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-		return C.CString(fmt.Sprintf("Error entrando en modo pasivo: %v", err))
-	}
-	if n, err = conn.Read(buf[:]); err != nil {
-		return C.CString(fmt.Sprintf("Error leyendo respuesta PASV: %v", err))
-	}
+    // Modo pasivo para transferencia
+    if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
+        return C.int(-14) // Error entrando en modo pasivo
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return C.int(-15) // Error leyendo respuesta PASV
+    }
 
-	pasvResp := string(buf[:n])
-	dataAddr, err := parsePASV(pasvResp)
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error analizando modo pasivo: %v", err))
-	}
+    pasvResp := string(buf[:n])
+    dataAddr, err := parsePASV(pasvResp)
+    if err != nil {
+        return C.int(-16) // Error analizando modo pasivo
+    }
 
-	dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
-	if err != nil {
-		return C.CString(fmt.Sprintf("Error conectando para datos: %v", err))
-	}
-	defer dataConn.Close()
-	dataConn.SetDeadline(time.Now().Add(timeout))
+    dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
+    if err != nil {
+        return C.int(-17) // Error conexión datos
+    }
+    defer dataConn.Close()
+    dataConn.SetDeadline(time.Now().Add(timeout))
 
-	// Solicitar archivo
-	if _, err = fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
-		return C.CString(fmt.Sprintf("Error solicitando archivo: %v", err))
-	}
+    // Comando STOR para subir archivo
+    if _, err = fmt.Fprintf(conn, "STOR %s\r\n", path); err != nil {
+        return C.int(-18) // Error iniciando transferencia
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
+        return C.int(-19) // Error preparando servidor
+    }
 
-	if n, err = conn.Read(buf[:]); err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-		return C.CString("Error iniciando transferencia de archivo")
-	}
+    // Enviar datos
+    _, err = io.Copy(dataConn, bytes.NewReader(data))
+    if err != nil {
+        return C.int(-20) // Error enviando datos
+    }
 
-	// Leer con límite de tamaño
-	limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
-	var buffer bytes.Buffer
+    // Cerrar conexión de datos primero
+    dataConn.Close()
 
-	if _, err = io.Copy(&buffer, limitedReader); err != nil {
-		return C.CString(fmt.Sprintf("Error recibiendo datos: %v", err))
-	}
+    // Verificar confirmación de transferencia
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "226") {
+        return C.int(-21) // Error confirmando transferencia
+    }
 
-	if limitedReader.N <= 0 {
-		return C.CString("Error: archivo excede el tamaño máximo permitido")
-	}
-
-	if buffer.Len() == 0 {
-		return C.CString("Advertencia: El archivo está vacío")
-	}
-
-	// Convertir a string y limpiar posibles caracteres especiales
-	text := buffer.String()
-	text = strings.ReplaceAll(text, "\r\n", "\n") // Normalizar saltos de línea
-	text = strings.TrimSpace(text)
-
-	return C.CString(text)
+    return C.int(0) // Éxito
 }
 
-//export FreeString
-func FreeString(str *C.char) {
-	C.free(unsafe.Pointer(str))
+//export PutFTPText
+func PutFTPText(textData, ftpUrl *C.char) C.int {
+    // Convertir C strings a Go strings
+    textStr := C.GoString(textData)
+    urlStr := C.GoString(ftpUrl)
+
+    // Validar entrada
+    if textStr == "" {
+        return C.int(-1) // Error: Texto vacío
+    }
+
+    if urlStr == "" {
+        return C.int(-2) // Error: URL vacía
+    }
+
+    // Parsear URL FTP
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return C.int(-4) // Error analizando URL
+    }
+
+    if u.Scheme != "ftp" {
+        return C.int(-5) // Error: URL no es FTP
+    }
+
+    // Extraer credenciales y ruta
+    user := u.User.Username()
+    pass, _ := u.User.Password()
+    host := u.Host
+    path := u.Path
+
+    if !strings.Contains(host, ":") {
+        host += ":21"
+    }
+
+    if host == "" || user == "" {
+        return C.int(-6) // Error: Falta host o usuario
+    }
+
+    // Establecer conexión FTP
+    conn, err := net.DialTimeout("tcp", host, timeout)
+    if err != nil {
+        return C.int(-7) // Error de conexión
+    }
+    defer conn.Close()
+    conn.SetDeadline(time.Now().Add(timeout))
+
+    var buf [1024]byte
+    n, err := conn.Read(buf[:])
+    if err != nil {
+        return C.int(-8) // Error lectura inicial
+    }
+
+    // Autenticación
+    if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+        return C.int(-9) // Error enviando usuario
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+        return C.int(-10) // Error autenticación usuario
+    }
+
+    if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+        return C.int(-11) // Error enviando contraseña
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+        return C.int(-12) // Error autenticación contraseña
+    }
+
+    // Configurar modo ASCII para texto
+    if _, err = fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
+        return C.int(-22) // Error configurando modo ASCII
+    }
+    conn.Read(buf[:])
+
+    // Modo pasivo para transferencia
+    if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
+        return C.int(-14) // Error entrando en modo pasivo
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return C.int(-15) // Error leyendo respuesta PASV
+    }
+
+    pasvResp := string(buf[:n])
+    dataAddr, err := parsePASV(pasvResp)
+    if err != nil {
+        return C.int(-16) // Error analizando modo pasivo
+    }
+
+    dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
+    if err != nil {
+        return C.int(-17) // Error conexión datos
+    }
+    defer dataConn.Close()
+    dataConn.SetDeadline(time.Now().Add(timeout))
+
+    // Comando STOR para subir archivo
+    if _, err = fmt.Fprintf(conn, "STOR %s\r\n", path); err != nil {
+        return C.int(-18) // Error iniciando transferencia
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
+        return C.int(-19) // Error preparando servidor
+    }
+
+    // Normalizar saltos de línea a CRLF (estándar FTP para texto)
+    normalizedText := strings.ReplaceAll(textStr, "\n", "\r\n")
+    
+    // Enviar datos
+    _, err = fmt.Fprintf(dataConn, normalizedText)
+    if err != nil {
+        return C.int(-20) // Error enviando datos
+    }
+
+    // Cerrar conexión de datos primero
+    dataConn.Close()
+
+    // Verificar confirmación de transferencia
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "226") {
+        return C.int(-21) // Error confirmando transferencia
+    }
+
+    return C.int(0) // Éxito
 }
+
+
+//export CreateFTPDir
+func CreateFTPDir(ftpUrl *C.char) C.int {
+    urlStr := C.GoString(ftpUrl)
+
+    // Validación básica
+    if urlStr == "" {
+        return C.int(-1) // Error: URL vacía
+    }
+
+    // Parsear URL FTP
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return C.int(-2) // Error analizando URL
+    }
+
+    if u.Scheme != "ftp" {
+        return C.int(-3) // Error: URL no es FTP
+    }
+
+    // Extraer credenciales y ruta
+    user := u.User.Username()
+    pass, _ := u.User.Password()
+    host := u.Host
+    path := strings.TrimPrefix(u.Path, "/")
+
+    if !strings.Contains(host, ":") {
+        host += ":21"
+    }
+
+    if host == "" || user == "" {
+        return C.int(-4) // Error: Falta host o usuario
+    }
+
+    if path == "" {
+        return C.int(-5) // Error: Falta path del directorio
+    }
+
+    // Establecer conexión FTP
+    conn, err := net.DialTimeout("tcp", host, timeout)
+    if err != nil {
+        return C.int(-6) // Error de conexión
+    }
+    defer conn.Close()
+    conn.SetDeadline(time.Now().Add(timeout))
+
+    var buf [1024]byte
+    n, err := conn.Read(buf[:])
+    if err != nil {
+        return C.int(-7) // Error lectura inicial
+    }
+
+    // Autenticación
+    if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+        return C.int(-8) // Error enviando usuario
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+        return C.int(-9) // Error autenticación usuario
+    }
+
+    if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+        return C.int(-10) // Error enviando contraseña
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+        return C.int(-11) // Error autenticación contraseña
+    }
+
+    // PRIMERO: Verificar si ya existe como archivo (comando SIZE)
+    if _, err = fmt.Fprintf(conn, "SIZE %s\r\n", path); err != nil {
+        return C.int(-15) // Error enviando comando SIZE
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return C.int(-16) // Error leyendo respuesta SIZE
+    }
+    
+    sizeResp := string(buf[:n])
+    if strings.HasPrefix(sizeResp, "213") {
+        return C.int(-17) // Ya existe como archivo (conflicto)
+    }
+
+    // SEGUNDO: Verificar si ya existe como directorio (comando CWD)
+    if _, err = fmt.Fprintf(conn, "CWD %s\r\n", path); err != nil {
+        return C.int(-18) // Error enviando comando CWD
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return C.int(-19) // Error leyendo respuesta CWD
+    }
+    
+    cwdResp := string(buf[:n])
+    if strings.HasPrefix(cwdResp, "250") {
+        // Volver al directorio anterior
+        _, _ = fmt.Fprintf(conn, "CDUP\r\n")
+        return C.int(1) // Ya existe como directorio (éxito relativo)
+    }
+
+    // TERCERO: Crear el directorio (comando MKD)
+    if _, err = fmt.Fprintf(conn, "MKD %s\r\n", path); err != nil {
+        return C.int(-12) // Error enviando comando MKD
+    }
+
+    // Leer respuesta
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return C.int(-13) // Error leyendo respuesta
+    }
+
+    resp := string(buf[:n])
+    if !strings.HasPrefix(resp, "257") {
+        return C.int(-14) // Error creando directorio
+    }
+
+    return C.int(0) // Éxito (directorio creado)
+}
+
+
+//export ListFTPFiles
+func ListFTPFiles(dirPath *C.char) **C.char {
+    urlStr := C.GoString(dirPath)
+
+    // Validación básica
+    if urlStr == "" {
+        return nil
+    }
+
+    // Parsear URL FTP
+    u, err := url.Parse(urlStr)
+    if err != nil || u.Scheme != "ftp" {
+        return nil
+    }
+
+    // Extraer credenciales y ruta
+    user := u.User.Username()
+    pass, _ := u.User.Password()
+    host := u.Host
+    path := u.Path
+
+    if !strings.Contains(host, ":") {
+        host += ":21"
+    }
+
+    if host == "" || user == "" {
+        return nil
+    }
+
+    // Establecer conexión FTP
+    conn, err := net.DialTimeout("tcp", host, timeout)
+    if err != nil {
+        return nil
+    }
+    defer conn.Close()
+    conn.SetDeadline(time.Now().Add(timeout))
+
+    var buf [1024]byte
+    n, err := conn.Read(buf[:])
+    if err != nil {
+        return nil
+    }
+
+    // Autenticación
+    if _, err := fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
+        return nil
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
+        return nil
+    }
+
+    if _, err := fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
+        return nil
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
+        return nil
+    }
+
+    // Configurar modo ASCII para listado
+    if _, err := fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
+        return nil
+    }
+    conn.Read(buf[:])
+
+    // Modo pasivo para transferencia
+    if _, err := fmt.Fprintf(conn, "PASV\r\n"); err != nil {
+        return nil
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil {
+        return nil
+    }
+
+    pasvResp := string(buf[:n])
+    dataAddr, err := parsePASV(pasvResp)
+    if err != nil {
+        return nil
+    }
+
+    dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
+    if err != nil {
+        return nil
+    }
+    defer dataConn.Close()
+    dataConn.SetDeadline(time.Now().Add(timeout))
+
+    // Comando LIST para obtener el listado
+    if _, err := fmt.Fprintf(conn, "LIST %s\r\n", path); err != nil {
+        return nil
+    }
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
+        return nil
+    }
+
+    // Leer el listado de archivos
+    var buffer bytes.Buffer
+    limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
+    if _, err := io.Copy(&buffer, limitedReader); err != nil {
+        return nil
+    }
+
+    // Cerrar conexión de datos primero
+    dataConn.Close()
+
+    // Verificar confirmación de transferencia
+    n, err = conn.Read(buf[:])
+    if err != nil || !strings.HasPrefix(string(buf[:n]), "226") {
+        return nil
+    }
+
+    // Procesar el listado de archivos
+    lines := strings.Split(buffer.String(), "\n")
+    var files []string
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if line == "" {
+            continue
+        }
+        // Extraer el nombre del archivo (última parte de la línea)
+        parts := strings.Fields(line)
+        if len(parts) > 0 {
+            files = append(files, parts[len(parts)-1])
+        }
+    }
+
+    if len(files) == 0 {
+        return nil
+    }
+
+    // Crear array de C strings
+    cArray := C.malloc(C.size_t(len(files)) * C.size_t(unsafe.Sizeof(uintptr(0))))
+    if cArray == nil {
+        return nil
+    }
+
+    // Convertir el array C a slice Go
+    goArray := (*[1<<30 - 1]*C.char)(unsafe.Pointer(cArray))[:len(files):len(files)]
+
+    for i, file := range files {
+        goArray[i] = C.CString(file)
+    }
+
+    return (**C.char)(cArray)
+}
+
+//export FreeFTPList
+func FreeFTPList(arr **C.char) {
+	if arr == nil {
+		return
+	}
+	for i := 0; ; i++ {
+		p := *(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(arr)) + uintptr(i)*unsafe.Sizeof(*arr)))
+		if p == nil {
+			break
+		}
+		C.free(unsafe.Pointer(p))
+	}
+	C.free(unsafe.Pointer(arr))
+}
+
 
 func main() {}
