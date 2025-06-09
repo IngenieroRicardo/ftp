@@ -74,10 +74,10 @@ int main() {
 #include "ftp.h"
 
 int main() {
-    char* dirPath = "."; // Directorio actual
+    char* dirPath = "ftp://usuario:password@127.0.0.1:21/ruta/directorio"; 
 
     // Obtener lista de archivos
-    char** ftps = Listftps(dirPath);
+    char** ftps = ListFTPFiles(dirPath);
 
     if (ftps != NULL) {
         printf("Archivos en el directorio '%s':\n", dirPath);
@@ -88,7 +88,7 @@ int main() {
         }
 
         // Liberar memoria
-        FreeListftps(ftps);
+        FreeFTPList(ftps);
     } else {
         printf("Error al leer el directorio o directorio vacío\n");
     }
