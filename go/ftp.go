@@ -7,13 +7,16 @@ import (
     "io"
     "net"
     "net/url"
+    "path/filepath"
     "strconv"
     "strings"
     "time"
+    "github.com/pkg/sftp"
+    "golang.org/x/crypto/ssh"
 )
 
 const (
-    maxFileSize = 90 * 1024 * 1024 // 90MB límite
+    maxFileSize = 90 * 1024 * 1024 // 90MB limit
     timeout     = 30 * time.Second
 )
 
@@ -43,6 +46,9 @@ const (
     ErrDataTransfer     = -22
     ErrTransferConfirm  = -23
     ErrAsciiMode        = -24
+    ErrSftpConnection   = -25
+    ErrSftpClient       = -26
+    ErrSftpOperation    = -27
 )
 
 func parsePASV(resp string) (string, error) {
@@ -65,11 +71,86 @@ func parsePASV(resp string) (string, error) {
     return fmt.Sprintf("%s:%d", ip, port), nil
 }
 
+func isSFTP(urlStr string) bool {
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return false
+    }
+    return u.Scheme == "sftp"
+}
+
+func createSFTPClient(ftpUrl string) (*sftp.Client, error) {
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return nil, fmt.Errorf("error parsing URL: %v", err)
+    }
+
+    user := u.User.Username()
+    pass, _ := u.User.Password()
+    host := u.Host
+
+    if !strings.Contains(host, ":") {
+        host += ":22"
+    }
+
+    config := &ssh.ClientConfig{
+        User: user,
+        Auth: []ssh.AuthMethod{
+            ssh.Password(pass),
+        },
+        HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+        Timeout:         timeout,
+    }
+
+    conn, err := ssh.Dial("tcp", host, config)
+    if err != nil {
+        return nil, fmt.Errorf("error code %d: failed to connect to SFTP server: %v", ErrSftpConnection, err)
+    }
+
+    client, err := sftp.NewClient(conn)
+    if err != nil {
+        return nil, fmt.Errorf("error code %d: failed to create SFTP client: %v", ErrSftpClient, err)
+    }
+
+    return client, nil
+}
+
 func GetFTPFile(ftpUrl string) string {
     if ftpUrl == "" {
         return ""
     }
 
+    if isSFTP(ftpUrl) {
+        client, err := createSFTPClient(ftpUrl)
+        if err != nil {
+            return ""
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(ftpUrl)
+        path := u.Path
+
+        file, err := client.Open(path)
+        if err != nil {
+            return ""
+        }
+        defer file.Close()
+
+        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+        var buffer bytes.Buffer
+        if _, err := io.Copy(&buffer, limitedReader); err != nil {
+            return ""
+        }
+
+        if limitedReader.N <= 0 || buffer.Len() == 0 {
+            return ""
+        }
+
+        encoded := base64.StdEncoding.EncodeToString(buffer.Bytes())
+        return encoded
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(ftpUrl)
     if err != nil || u.Scheme != "ftp" {
         return ""
@@ -174,6 +255,39 @@ func GetFTPText(ftpUrl string) string {
         return ""
     }
 
+    if isSFTP(ftpUrl) {
+        client, err := createSFTPClient(ftpUrl)
+        if err != nil {
+            return ""
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(ftpUrl)
+        path := u.Path
+
+        file, err := client.Open(path)
+        if err != nil {
+            return ""
+        }
+        defer file.Close()
+
+        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+        var buffer bytes.Buffer
+        if _, err := io.Copy(&buffer, limitedReader); err != nil {
+            return ""
+        }
+
+        if limitedReader.N <= 0 || buffer.Len() == 0 {
+            return ""
+        }
+
+        text := buffer.String()
+        text = strings.ReplaceAll(text, "\r\n", "\n")
+        text = strings.TrimSpace(text)
+        return text
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(ftpUrl)
     if err != nil || u.Scheme != "ftp" {
         return ""
@@ -288,6 +402,38 @@ func PutFTPFile(base64Data, ftpUrl string) error {
         return fmt.Errorf("error decodificando base64: %v", err)
     }
 
+    if isSFTP(ftpUrl) {
+        client, err := createSFTPClient(ftpUrl)
+        if err != nil {
+            return err
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(ftpUrl)
+        path := u.Path
+
+        // Create parent directories if they don't exist
+        dir := filepath.Dir(path)
+        if dir != "." {
+            if err := client.MkdirAll(dir); err != nil {
+                return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
+            }
+        }
+
+        file, err := client.Create(path)
+        if err != nil {
+            return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
+        }
+        defer file.Close()
+
+        if _, err := file.Write(data); err != nil {
+            return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
+        }
+
+        return nil
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(ftpUrl)
     if err != nil {
         return fmt.Errorf("error analizando URL: %v", err)
@@ -394,6 +540,39 @@ func PutFTPText(textData, ftpUrl string) error {
         return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
     }
 
+    if isSFTP(ftpUrl) {
+        client, err := createSFTPClient(ftpUrl)
+        if err != nil {
+            return err
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(ftpUrl)
+        path := u.Path
+
+        // Create parent directories if they don't exist
+        dir := filepath.Dir(path)
+        if dir != "." {
+            if err := client.MkdirAll(dir); err != nil {
+                return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
+            }
+        }
+
+        file, err := client.Create(path)
+        if err != nil {
+            return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
+        }
+        defer file.Close()
+
+        normalizedText := strings.ReplaceAll(textData, "\n", "\r\n")
+        if _, err := fmt.Fprintf(file, normalizedText); err != nil {
+            return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
+        }
+
+        return nil
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(ftpUrl)
     if err != nil {
         return fmt.Errorf("error analizando URL: %v", err)
@@ -498,6 +677,37 @@ func CreateFTPDir(ftpUrl string) error {
         return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
     }
 
+    if isSFTP(ftpUrl) {
+        client, err := createSFTPClient(ftpUrl)
+        if err != nil {
+            return err
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(ftpUrl)
+        path := strings.TrimPrefix(u.Path, "/")
+
+        if path == "" {
+            return fmt.Errorf("error code %d: falta path del directorio", ErrMissingPath)
+        }
+
+        // Check if path exists as a file
+        if stat, err := client.Stat(path); err == nil {
+            if !stat.IsDir() {
+                return fmt.Errorf("error code %d: ya existe como archivo (conflicto)", ErrFileConflict)
+            }
+            return nil // Already exists as directory
+        }
+
+        // Create the directory
+        if err := client.MkdirAll(path); err != nil {
+            return fmt.Errorf("error code %d: error creando directorio: %v", ErrMkdirFailed, err)
+        }
+
+        return nil
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(ftpUrl)
     if err != nil {
         return fmt.Errorf("error analizando URL: %v", err)
@@ -601,6 +811,30 @@ func ListFTPFiles(dirPath string) []string {
         return nil
     }
 
+    if isSFTP(dirPath) {
+        client, err := createSFTPClient(dirPath)
+        if err != nil {
+            return nil
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(dirPath)
+        path := u.Path
+
+        files, err := client.ReadDir(path)
+        if err != nil {
+            return nil
+        }
+
+        var fileNames []string
+        for _, file := range files {
+            fileNames = append(fileNames, file.Name())
+        }
+
+        return fileNames
+    }
+
+    // Original FTP implementation
     u, err := url.Parse(dirPath)
     if err != nil || u.Scheme != "ftp" {
         return nil
