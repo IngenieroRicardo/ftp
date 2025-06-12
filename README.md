@@ -1,4 +1,4 @@
-# FTP
+# FTP y SFTP
 Una biblioteca ligera para hacer peticiones ftp en C  
 Compilada usando: `go build -o ftp.dll -buildmode=c-shared ftp.go`
 
