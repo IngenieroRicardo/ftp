@@ -84,16 +84,16 @@ func isSFTP(urlStr string) bool {
     return u.Scheme == "sftp"
 }
 
-func createSFTPClient(ftpUrl string) (*sftp.Client, error) {
+
+func createSFTPClient(ftpUrl string) (*sftp.Client, *ssh.Client, error) {
     u, err := url.Parse(ftpUrl)
     if err != nil {
-        return nil, fmt.Errorf("error parsing URL: %v", err)
+        return nil, nil, fmt.Errorf("error parsing URL: %v", err)
     }
 
     user := u.User.Username()
     pass, _ := u.User.Password()
     host := u.Host
-
     if !strings.Contains(host, ":") {
         host += ":22"
     }
@@ -109,16 +109,19 @@ func createSFTPClient(ftpUrl string) (*sftp.Client, error) {
 
     conn, err := ssh.Dial("tcp", host, config)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to SFTP server: %v", err)
+        return nil, nil, fmt.Errorf("error code %d: failed to connect to SFTP server: %v", ErrSftpConnection, err)
     }
 
     client, err := sftp.NewClient(conn)
     if err != nil {
-        return nil, fmt.Errorf("failed to create SFTP client: %v", err)
+        conn.Close()
+        return nil, nil, fmt.Errorf("error code %d: failed to create SFTP client: %v", ErrSftpClient, err)
     }
 
-    return client, nil
+    return client, conn, nil
 }
+
+
 
 //export GetFTPFile
 func GetFTPFile(ftpUrl *C.char) *C.char {
@@ -128,33 +131,7 @@ func GetFTPFile(ftpUrl *C.char) *C.char {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return nil
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := u.Path
-
-        file, err := client.Open(path)
-        if err != nil {
-            return nil
-        }
-        defer file.Close()
-
-        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
-        var buffer bytes.Buffer
-        if _, err := io.Copy(&buffer, limitedReader); err != nil {
-            return nil
-        }
-
-        if limitedReader.N <= 0 || buffer.Len() == 0 {
-            return nil
-        }
-
-        encoded := base64.StdEncoding.EncodeToString(buffer.Bytes())
-        return C.CString(encoded)
+        return C.CString(GetSFTPFile(urlStr))
     }
 
     // Original FTP implementation
@@ -265,35 +242,7 @@ func GetFTPText(ftpUrl *C.char) *C.char {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return nil
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := u.Path
-
-        file, err := client.Open(path)
-        if err != nil {
-            return nil
-        }
-        defer file.Close()
-
-        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
-        var buffer bytes.Buffer
-        if _, err := io.Copy(&buffer, limitedReader); err != nil {
-            return nil
-        }
-
-        if limitedReader.N <= 0 || buffer.Len() == 0 {
-            return nil
-        }
-
-        text := buffer.String()
-        text = strings.ReplaceAll(text, "\r\n", "\n")
-        text = strings.TrimSpace(text)
-        return C.CString(text)
+        return C.CString(GetSFTPText(urlStr))
     }
 
     // Original FTP implementation
@@ -415,34 +364,8 @@ func PutFTPFile(base64Data, ftpUrl *C.char) C.int {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return C.int(ErrSftpConnection)
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := u.Path
-
-        // Create parent directories if they don't exist
-        dir := filepath.Dir(path)
-        if dir != "." {
-            if err := client.MkdirAll(dir); err != nil {
-                return C.int(ErrSftpOperation)
-            }
-        }
-
-        file, err := client.Create(path)
-        if err != nil {
-            return C.int(ErrSftpOperation)
-        }
-        defer file.Close()
-
-        if _, err := file.Write(data); err != nil {
-            return C.int(ErrSftpOperation)
-        }
-
-        return C.int(0) // Success
+        err := PutSFTPFile(base64Str, urlStr)
+        return C.int(err)
     }
 
     // Original FTP implementation
@@ -556,35 +479,8 @@ func PutFTPText(textData, ftpUrl *C.char) C.int {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return C.int(ErrSftpConnection)
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := u.Path
-
-        // Create parent directories if they don't exist
-        dir := filepath.Dir(path)
-        if dir != "." {
-            if err := client.MkdirAll(dir); err != nil {
-                return C.int(ErrSftpOperation)
-            }
-        }
-
-        file, err := client.Create(path)
-        if err != nil {
-            return C.int(ErrSftpOperation)
-        }
-        defer file.Close()
-
-        normalizedText := strings.ReplaceAll(textStr, "\n", "\r\n")
-        if _, err := fmt.Fprintf(file, normalizedText); err != nil {
-            return C.int(ErrSftpOperation)
-        }
-
-        return C.int(0) // Success
+        err := PutSFTPText(textData, ftpUrl)
+        return C.int(err)
     }
 
     // Original FTP implementation
@@ -695,33 +591,8 @@ func CreateFTPDir(ftpUrl *C.char) C.int {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return C.int(ErrSftpConnection)
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := strings.TrimPrefix(u.Path, "/")
-
-        if path == "" {
-            return C.int(ErrMissingPath)
-        }
-
-        // Check if path exists as a file
-        if stat, err := client.Stat(path); err == nil {
-            if !stat.IsDir() {
-                return C.int(ErrFileConflict)
-            }
-            return C.int(1) // Already exists as directory
-        }
-
-        // Create the directory
-        if err := client.MkdirAll(path); err != nil {
-            return C.int(ErrMkdirFailed)
-        }
-
-        return C.int(0) // Success
+        err := CreateSFTPDir(ftpUrl)
+        return C.int(err)
     }
 
     // Original FTP implementation
@@ -828,25 +699,8 @@ func ListFTPFiles(dirPath *C.char) **C.char {
     }
 
     if isSFTP(urlStr) {
-        client, err := createSFTPClient(urlStr)
-        if err != nil {
-            return nil
-        }
-        defer client.Close()
-
-        u, _ := url.Parse(urlStr)
-        path := u.Path
-
-        files, err := client.ReadDir(path)
-        if err != nil {
-            return nil
-        }
-
-        var fileNames []string
-        for _, file := range files {
-            fileNames = append(fileNames, file.Name())
-        }
-
+        
+        fileNames := ListSFTPFiles(urlStr)
         if len(fileNames) == 0 {
             return nil
         }
