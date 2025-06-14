@@ -857,4 +857,237 @@ func FreeFTPList(arr **C.char) {
     C.free(unsafe.Pointer(arr))
 }
 
+
+
+
+
+
+
+func GetSFTPFile(ftpUrl string) string {
+    if ftpUrl == "" {
+        return ""
+    }
+
+    client, conn, err := createSFTPClient(ftpUrl)
+    if err != nil {
+        return ""
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return ""
+    }
+
+    file, err := client.Open(u.Path)
+    if err != nil {
+        return ""
+    }
+    defer file.Close()
+
+    limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+    var buffer bytes.Buffer
+    if _, err := io.Copy(&buffer, limitedReader); err != nil {
+        return ""
+    }
+
+    if buffer.Len() == 0 {
+        return ""
+    }
+
+    return base64.StdEncoding.EncodeToString(buffer.Bytes())
+}
+
+func GetSFTPText(ftpUrl string) string {
+    if ftpUrl == "" {
+        return ""
+    }
+
+    client, conn, err := createSFTPClient(ftpUrl)
+    if err != nil {
+        return ""
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return ""
+    }
+
+    file, err := client.Open(u.Path)
+    if err != nil {
+        return ""
+    }
+    defer file.Close()
+
+    limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+    var buffer bytes.Buffer
+    if _, err := io.Copy(&buffer, limitedReader); err != nil {
+        return ""
+    }
+
+    if buffer.Len() == 0 {
+        return ""
+    }
+
+    text := buffer.String()
+    text = strings.ReplaceAll(text, "\r\n", "\n")
+    return strings.TrimSpace(text)
+}
+
+func PutSFTPFile(base64Data, ftpUrl string) error {
+    if base64Data == "" {
+        return fmt.Errorf("error code %d: datos vacíos", ErrEmptyData)
+    }
+    if ftpUrl == "" {
+        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+    }
+
+    data, err := base64.StdEncoding.DecodeString(base64Data)
+    if err != nil {
+        return fmt.Errorf("error decodificando base64: %v", err)
+    }
+
+    client, conn, err := createSFTPClient(ftpUrl)
+    if err != nil {
+        return err
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return err
+    }
+
+    dir := filepath.Dir(u.Path)
+    if dir != "." {
+        if err := client.MkdirAll(dir); err != nil {
+            return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
+        }
+    }
+
+    file, err := client.Create(u.Path)
+    if err != nil {
+        return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
+    }
+    defer file.Close()
+
+    if _, err := file.Write(data); err != nil {
+        return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
+    }
+
+    return nil
+}
+
+func PutSFTPText(textData, ftpUrl string) error {
+    if textData == "" {
+        return fmt.Errorf("error code %d: texto vacío", ErrEmptyData)
+    }
+    if ftpUrl == "" {
+        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+    }
+
+    client, conn, err := createSFTPClient(ftpUrl)
+    if err != nil {
+        return err
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return err
+    }
+
+    dir := filepath.Dir(u.Path)
+    if dir != "." {
+        if err := client.MkdirAll(dir); err != nil {
+            return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
+        }
+    }
+
+    file, err := client.Create(u.Path)
+    if err != nil {
+        return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
+    }
+    defer file.Close()
+
+    normalizedText := strings.ReplaceAll(strings.ReplaceAll(textData, "\r\n", "\n"), "\n", "\r\n")
+    if _, err := fmt.Fprint(file, normalizedText); err != nil {
+        return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
+    }
+
+    return nil
+}
+
+func CreateSFTPDir(ftpUrl string) error {
+    if ftpUrl == "" {
+        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+    }
+
+    client, conn, err := createSFTPClient(ftpUrl)
+    if err != nil {
+        return err
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(ftpUrl)
+    if err != nil {
+        return err
+    }
+
+    path := strings.TrimPrefix(u.Path, "/")
+    if path == "" {
+        return fmt.Errorf("error code %d: falta path del directorio", ErrMissingPath)
+    }
+
+    if stat, err := client.Stat(path); err == nil {
+        if !stat.IsDir() {
+            return fmt.Errorf("error code %d: ya existe como archivo (conflicto)", ErrFileConflict)
+        }
+        return nil
+    }
+
+    if err := client.MkdirAll(path); err != nil {
+        return fmt.Errorf("error code %d: error creando directorio: %v", ErrMkdirFailed, err)
+    }
+
+    return nil
+}
+
+func ListSFTPFiles(dirPath string) []string {
+    if dirPath == "" {
+        return nil
+    }
+
+    client, conn, err := createSFTPClient(dirPath)
+    if err != nil {
+        return nil
+    }
+    defer client.Close()
+    defer conn.Close()
+
+    u, err := url.Parse(dirPath)
+    if err != nil {
+        return nil
+    }
+
+    files, err := client.ReadDir(u.Path)
+    if err != nil {
+        return nil
+    }
+
+    var fileNames []string
+    for _, file := range files {
+        fileNames = append(fileNames, file.Name())
+    }
+
+    return fileNames
+}
+
+
 func main() {}
