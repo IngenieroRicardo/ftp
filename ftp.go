@@ -365,7 +365,10 @@ func PutFTPFile(base64Data, ftpUrl *C.char) C.int {
 
     if isSFTP(urlStr) {
         err := PutSFTPFile(base64Str, urlStr)
-        return C.int(err)
+        if err != nil {
+            return C.int(ErrSftpOperation)
+        }
+        return C.int(0)
     }
 
     // Original FTP implementation
@@ -479,8 +482,11 @@ func PutFTPText(textData, ftpUrl *C.char) C.int {
     }
 
     if isSFTP(urlStr) {
-        err := PutSFTPText(textData, ftpUrl)
-        return C.int(err)
+        err := PutSFTPText(textStr, urlStr)
+        if err != nil {
+            return C.int(ErrSftpOperation)
+        }
+        return C.int(0)
     }
 
     // Original FTP implementation
@@ -591,8 +597,12 @@ func CreateFTPDir(ftpUrl *C.char) C.int {
     }
 
     if isSFTP(urlStr) {
-        err := CreateSFTPDir(ftpUrl)
-        return C.int(err)
+        err := CreateSFTPDir(urlStr)
+        if err != nil {
+            // Handle specific error types if needed
+            return C.int(ErrSftpOperation)
+        }
+        return C.int(0)
     }
 
     // Original FTP implementation
