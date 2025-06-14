@@ -32,6 +32,7 @@ Compilada usando: `go build -o ftp.dll -buildmode=c-shared ftp.go`
 int main() {
     // 1. Ejemplo de escritura binaria desde base64
     char* base64Data = "SGVsbG8gV29ybGQh"; // "Hello World!" en base64
+    //char* binaryPath = "sftp://usuario:password@127.0.0.1:22/ruta/salida.bin";
     char* binaryPath = "ftp://usuario:password@127.0.0.1:21/ruta/salida.bin";
 
     if (PutFTPFile(base64Data, binaryPath) == 0) {
@@ -40,6 +41,7 @@ int main() {
 
     // 2. Ejemplo de escritura de texto
     char* textData = "Este es un texto de ejemplo\nSegunda línea";
+    //char* textPath = "sftp://usuario:password@127.0.0.1:22/ruta/salida.txt";
     char* textPath = "ftp://usuario:password@127.0.0.1:21/ruta/salida.txt";
 
     if (PutFTPText(textData, textPath) == 0) {
@@ -74,6 +76,7 @@ int main() {
 #include "ftp.h"
 
 int main() {
+    //char* dirPath = "sftp://usuario:password@127.0.0.1:22/ruta/directorio"; 
     char* dirPath = "ftp://usuario:password@127.0.0.1:21/ruta/directorio"; 
 
     // Obtener lista de archivos
