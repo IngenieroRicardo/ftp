@@ -1,28 +1,31 @@
-package ftp
+package main
 
+/*
+#include <stdlib.h>
+*/
+import "C"
 import (
     "bytes"
     "encoding/base64"
     "fmt"
-    "io"
     "net"
+    "unsafe"
+    "time"
+    "io"
+    "strings"
     "net/url"
     "path/filepath"
     "strconv"
-    "strings"
-    "time"
     "github.com/pkg/sftp"
     "golang.org/x/crypto/ssh"
 )
 
-
 const (
-    maxFileSize = 90 * 1024 * 1024 // 90MB limit
+    maxFileSize = 90 * 1024 * 1024 // 90MB límite
     timeout     = 30 * time.Second
 )
 
-
-// Error codes
+// Error codes (compatible with C)
 const (
     ErrEmptyData        = -1
     ErrEmptyURL         = -2
@@ -81,15 +84,16 @@ func isSFTP(urlStr string) bool {
     return u.Scheme == "sftp"
 }
 
-func createSFTPClient(ftpUrl string) (*sftp.Client, *ssh.Client, error) {
+func createSFTPClient(ftpUrl string) (*sftp.Client, error) {
     u, err := url.Parse(ftpUrl)
     if err != nil {
-        return nil, nil, fmt.Errorf("error parsing URL: %v", err)
+        return nil, fmt.Errorf("error parsing URL: %v", err)
     }
 
     user := u.User.Username()
     pass, _ := u.User.Password()
     host := u.Host
+
     if !strings.Contains(host, ":") {
         host += ":22"
     }
@@ -105,32 +109,58 @@ func createSFTPClient(ftpUrl string) (*sftp.Client, *ssh.Client, error) {
 
     conn, err := ssh.Dial("tcp", host, config)
     if err != nil {
-        return nil, nil, fmt.Errorf("error code %d: failed to connect to SFTP server: %v", ErrSftpConnection, err)
+        return nil, fmt.Errorf("failed to connect to SFTP server: %v", err)
     }
 
     client, err := sftp.NewClient(conn)
     if err != nil {
-        conn.Close()
-        return nil, nil, fmt.Errorf("error code %d: failed to create SFTP client: %v", ErrSftpClient, err)
+        return nil, fmt.Errorf("failed to create SFTP client: %v", err)
     }
 
-    return client, conn, nil
+    return client, nil
 }
 
-
-func GetFTPFile(ftpUrl string) string {
-    if ftpUrl == "" {
-        return ""
+//export GetFTPFile
+func GetFTPFile(ftpUrl *C.char) *C.char {
+    urlStr := C.GoString(ftpUrl)
+    if urlStr == "" {
+        return nil
     }
 
-    if isSFTP(ftpUrl) {
-        return GetSFTPFile(ftpUrl)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return nil
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := u.Path
+
+        file, err := client.Open(path)
+        if err != nil {
+            return nil
+        }
+        defer file.Close()
+
+        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+        var buffer bytes.Buffer
+        if _, err := io.Copy(&buffer, limitedReader); err != nil {
+            return nil
+        }
+
+        if limitedReader.N <= 0 || buffer.Len() == 0 {
+            return nil
+        }
+
+        encoded := base64.StdEncoding.EncodeToString(buffer.Bytes())
+        return C.CString(encoded)
     }
 
     // Original FTP implementation
-    u, err := url.Parse(ftpUrl)
+    u, err := url.Parse(urlStr)
     if err != nil || u.Scheme != "ftp" {
-        return ""
+        return nil
     }
 
     user := u.User.Username()
@@ -143,12 +173,12 @@ func GetFTPFile(ftpUrl string) string {
     }
 
     if host == "" || user == "" {
-        return ""
+        return nil
     }
 
     conn, err := net.DialTimeout("tcp", host, timeout)
     if err != nil {
-        return ""
+        return nil
     }
     defer conn.Close()
     conn.SetDeadline(time.Now().Add(timeout))
@@ -156,90 +186,120 @@ func GetFTPFile(ftpUrl string) string {
     var buf [1024]byte
     n, err := conn.Read(buf[:])
     if err != nil {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "TYPE I\r\n"); err != nil {
-        return ""
+        return nil
     }
     conn.Read(buf[:])
 
     if _, err := fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return ""
+        return nil
     }
 
     pasvResp := string(buf[:n])
     dataAddr, err := parsePASV(pasvResp)
     if err != nil {
-        return ""
+        return nil
     }
 
     dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
     if err != nil {
-        return ""
+        return nil
     }
     defer dataConn.Close()
     dataConn.SetDeadline(time.Now().Add(timeout))
 
     if _, err := fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-        return ""
+        return nil
     }
 
     limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
     var buffer bytes.Buffer
     if _, err := io.Copy(&buffer, limitedReader); err != nil {
-        return ""
+        return nil
     }
 
     if limitedReader.N <= 0 {
-        return ""
+        return nil
     }
 
     if buffer.Len() == 0 {
-        return ""
+        return nil
     }
 
     encoded := base64.StdEncoding.EncodeToString(buffer.Bytes())
-    return encoded
+    return C.CString(encoded)
 }
 
-func GetFTPText(ftpUrl string) string {
-    if ftpUrl == "" {
-        return ""
+//export GetFTPText
+func GetFTPText(ftpUrl *C.char) *C.char {
+    urlStr := C.GoString(ftpUrl)
+    if urlStr == "" {
+        return nil
     }
 
-    if isSFTP(ftpUrl) {
-        return GetSFTPText(ftpUrl)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return nil
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := u.Path
+
+        file, err := client.Open(path)
+        if err != nil {
+            return nil
+        }
+        defer file.Close()
+
+        limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
+        var buffer bytes.Buffer
+        if _, err := io.Copy(&buffer, limitedReader); err != nil {
+            return nil
+        }
+
+        if limitedReader.N <= 0 || buffer.Len() == 0 {
+            return nil
+        }
+
+        text := buffer.String()
+        text = strings.ReplaceAll(text, "\r\n", "\n")
+        text = strings.TrimSpace(text)
+        return C.CString(text)
     }
 
     // Original FTP implementation
-    u, err := url.Parse(ftpUrl)
+    u, err := url.Parse(urlStr)
     if err != nil || u.Scheme != "ftp" {
-        return ""
+        return nil
     }
 
     user := u.User.Username()
@@ -252,12 +312,12 @@ func GetFTPText(ftpUrl string) string {
     }
 
     if host == "" || user == "" {
-        return ""
+        return nil
     }
 
     conn, err := net.DialTimeout("tcp", host, timeout)
     if err != nil {
-        return ""
+        return nil
     }
     defer conn.Close()
     conn.SetDeadline(time.Now().Add(timeout))
@@ -265,103 +325,133 @@ func GetFTPText(ftpUrl string) string {
     var buf [1024]byte
     n, err := conn.Read(buf[:])
     if err != nil {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-        return ""
+        return nil
     }
 
     if _, err := fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
-        return ""
+        return nil
     }
     conn.Read(buf[:])
 
     if _, err := fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return ""
+        return nil
     }
 
     pasvResp := string(buf[:n])
     dataAddr, err := parsePASV(pasvResp)
     if err != nil {
-        return ""
+        return nil
     }
 
     dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
     if err != nil {
-        return ""
+        return nil
     }
     defer dataConn.Close()
     dataConn.SetDeadline(time.Now().Add(timeout))
 
     if _, err := fmt.Fprintf(conn, "RETR %s\r\n", path); err != nil {
-        return ""
+        return nil
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-        return ""
+        return nil
     }
 
     limitedReader := &io.LimitedReader{R: dataConn, N: maxFileSize}
     var buffer bytes.Buffer
     if _, err := io.Copy(&buffer, limitedReader); err != nil {
-        return ""
+        return nil
     }
 
     if limitedReader.N <= 0 {
-        return ""
+        return nil
     }
 
     if buffer.Len() == 0 {
-        return ""
+        return nil
     }
 
     text := buffer.String()
     text = strings.ReplaceAll(text, "\r\n", "\n")
     text = strings.TrimSpace(text)
-    return text
+    return C.CString(text)
 }
 
-func PutFTPFile(base64Data, ftpUrl string) error {
-    if base64Data == "" {
-        return fmt.Errorf("error code %d: datos vacíos", ErrEmptyData)
+//export PutFTPFile
+func PutFTPFile(base64Data, ftpUrl *C.char) C.int {
+    base64Str := C.GoString(base64Data)
+    urlStr := C.GoString(ftpUrl)
+    if base64Str == "" {
+        return C.int(ErrEmptyData)
     }
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+    if urlStr == "" {
+        return C.int(ErrEmptyURL)
     }
 
-    data, err := base64.StdEncoding.DecodeString(base64Data)
+    data, err := base64.StdEncoding.DecodeString(base64Str)
     if err != nil {
-        return fmt.Errorf("error decodificando base64: %v", err)
+        return C.int(-3) // Error decodificando base64
     }
 
-    if isSFTP(ftpUrl) {
-        return PutSFTPFile(base64Data, ftpUrl)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return C.int(ErrSftpConnection)
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := u.Path
+
+        // Create parent directories if they don't exist
+        dir := filepath.Dir(path)
+        if dir != "." {
+            if err := client.MkdirAll(dir); err != nil {
+                return C.int(ErrSftpOperation)
+            }
+        }
+
+        file, err := client.Create(path)
+        if err != nil {
+            return C.int(ErrSftpOperation)
+        }
+        defer file.Close()
+
+        if _, err := file.Write(data); err != nil {
+            return C.int(ErrSftpOperation)
+        }
+
+        return C.int(0) // Success
     }
 
     // Original FTP implementation
-    u, err := url.Parse(ftpUrl)
+    u, err := url.Parse(urlStr)
     if err != nil {
-        return fmt.Errorf("error analizando URL: %v", err)
+        return C.int(ErrEmptyURL)
     }
     if u.Scheme != "ftp" {
-        return fmt.Errorf("error code %d: URL no es FTP", ErrInvalidScheme)
+        return C.int(ErrInvalidScheme)
     }
 
     user := u.User.Username()
@@ -374,12 +464,12 @@ func PutFTPFile(base64Data, ftpUrl string) error {
     }
 
     if host == "" || user == "" {
-        return fmt.Errorf("error code %d: falta host o usuario", ErrMissingHostUser)
+        return C.int(ErrMissingHostUser)
     }
 
     conn, err := net.DialTimeout("tcp", host, timeout)
     if err != nil {
-        return fmt.Errorf("error code %d: conexión fallida: %v", ErrConnectionFailed, err)
+        return C.int(ErrConnectionFailed)
     }
     defer conn.Close()
     conn.SetDeadline(time.Now().Add(timeout))
@@ -387,92 +477,123 @@ func PutFTPFile(base64Data, ftpUrl string) error {
     var buf [1024]byte
     n, err := conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: lectura inicial fallida: %v", ErrInitialRead, err)
+        return C.int(ErrInitialRead)
     }
 
     if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-        return fmt.Errorf("error code %d: error enviando usuario: %v", ErrUserSend, err)
+        return C.int(ErrUserSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-        return fmt.Errorf("error code %d: autenticación de usuario fallida", ErrUserAuth)
+        return C.int(ErrUserAuth)
     }
 
     if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-        return fmt.Errorf("error code %d: error enviando contraseña: %v", ErrPassSend, err)
+        return C.int(ErrPassSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-        return fmt.Errorf("error code %d: autenticación de contraseña fallida", ErrPassAuth)
+        return C.int(ErrPassAuth)
     }
 
     if _, err = fmt.Fprintf(conn, "TYPE I\r\n"); err != nil {
-        return fmt.Errorf("error code %d: error configurando modo binario", ErrTypeCommand)
+        return C.int(ErrTypeCommand)
     }
     conn.Read(buf[:])
 
     if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-        return fmt.Errorf("error code %d: error entrando en modo pasivo", ErrPasvMode)
+        return C.int(ErrPasvMode)
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: error leyendo respuesta PASV", ErrPasvMode)
+        return C.int(ErrPasvMode)
     }
 
     pasvResp := string(buf[:n])
     dataAddr, err := parsePASV(pasvResp)
     if err != nil {
-        return fmt.Errorf("error code %d: error analizando modo pasivo: %v", ErrPasvMode, err)
+        return C.int(ErrPasvMode)
     }
 
     dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
     if err != nil {
-        return fmt.Errorf("error code %d: error conexión de datos: %v", ErrConnectionFailed, err)
+        return C.int(ErrConnectionFailed)
     }
     defer dataConn.Close()
     dataConn.SetDeadline(time.Now().Add(timeout))
 
     if _, err = fmt.Fprintf(conn, "STOR %s\r\n", path); err != nil {
-        return fmt.Errorf("error code %d: error iniciando transferencia", ErrStorCommand)
+        return C.int(ErrStorCommand)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-        return fmt.Errorf("error code %d: error preparando servidor", ErrDataTransfer)
+        return C.int(ErrDataTransfer)
     }
 
     _, err = io.Copy(dataConn, bytes.NewReader(data))
     if err != nil {
-        return fmt.Errorf("error code %d: error enviando datos: %v", ErrDataTransfer, err)
+        return C.int(ErrDataTransfer)
     }
     dataConn.Close()
 
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "226") {
-        return fmt.Errorf("error code %d: error confirmando transferencia", ErrTransferConfirm)
+        return C.int(ErrTransferConfirm)
     }
 
-    return nil
+    return C.int(0) // Success
 }
 
-func PutFTPText(textData, ftpUrl string) error {
-    if textData == "" {
-        return fmt.Errorf("error code %d: texto vacío", ErrEmptyData)
+//export PutFTPText
+func PutFTPText(textData, ftpUrl *C.char) C.int {
+    textStr := C.GoString(textData)
+    urlStr := C.GoString(ftpUrl)
+    if textStr == "" {
+        return C.int(ErrEmptyData)
     }
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+    if urlStr == "" {
+        return C.int(ErrEmptyURL)
     }
 
-    if isSFTP(ftpUrl) {
-        return PutSFTPText(textData, ftpUrl)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return C.int(ErrSftpConnection)
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := u.Path
+
+        // Create parent directories if they don't exist
+        dir := filepath.Dir(path)
+        if dir != "." {
+            if err := client.MkdirAll(dir); err != nil {
+                return C.int(ErrSftpOperation)
+            }
+        }
+
+        file, err := client.Create(path)
+        if err != nil {
+            return C.int(ErrSftpOperation)
+        }
+        defer file.Close()
+
+        normalizedText := strings.ReplaceAll(textStr, "\n", "\r\n")
+        if _, err := fmt.Fprintf(file, normalizedText); err != nil {
+            return C.int(ErrSftpOperation)
+        }
+
+        return C.int(0) // Success
     }
 
     // Original FTP implementation
-    u, err := url.Parse(ftpUrl)
+    u, err := url.Parse(urlStr)
     if err != nil {
-        return fmt.Errorf("error analizando URL: %v", err)
+        return C.int(ErrEmptyURL)
     }
     if u.Scheme != "ftp" {
-        return fmt.Errorf("error code %d: URL no es FTP", ErrInvalidScheme)
+        return C.int(ErrInvalidScheme)
     }
 
     user := u.User.Username()
@@ -485,12 +606,12 @@ func PutFTPText(textData, ftpUrl string) error {
     }
 
     if host == "" || user == "" {
-        return fmt.Errorf("error code %d: falta host o usuario", ErrMissingHostUser)
+        return C.int(ErrMissingHostUser)
     }
 
     conn, err := net.DialTimeout("tcp", host, timeout)
     if err != nil {
-        return fmt.Errorf("error code %d: conexión fallida: %v", ErrConnectionFailed, err)
+        return C.int(ErrConnectionFailed)
     }
     defer conn.Close()
     conn.SetDeadline(time.Now().Add(timeout))
@@ -498,90 +619,118 @@ func PutFTPText(textData, ftpUrl string) error {
     var buf [1024]byte
     n, err := conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: lectura inicial fallida: %v", ErrInitialRead, err)
+        return C.int(ErrInitialRead)
     }
 
     if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-        return fmt.Errorf("error code %d: error enviando usuario: %v", ErrUserSend, err)
+        return C.int(ErrUserSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-        return fmt.Errorf("error code %d: autenticación de usuario fallida", ErrUserAuth)
+        return C.int(ErrUserAuth)
     }
 
     if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-        return fmt.Errorf("error code %d: error enviando contraseña: %v", ErrPassSend, err)
+        return C.int(ErrPassSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-        return fmt.Errorf("error code %d: autenticación de contraseña fallida", ErrPassAuth)
+        return C.int(ErrPassAuth)
     }
 
     if _, err = fmt.Fprintf(conn, "TYPE A\r\n"); err != nil {
-        return fmt.Errorf("error code %d: error configurando modo ASCII", ErrAsciiMode)
+        return C.int(ErrAsciiMode)
     }
     conn.Read(buf[:])
 
     if _, err = fmt.Fprintf(conn, "PASV\r\n"); err != nil {
-        return fmt.Errorf("error code %d: error entrando en modo pasivo", ErrPasvMode)
+        return C.int(ErrPasvMode)
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: error leyendo respuesta PASV", ErrPasvMode)
+        return C.int(ErrPasvMode)
     }
 
     pasvResp := string(buf[:n])
     dataAddr, err := parsePASV(pasvResp)
     if err != nil {
-        return fmt.Errorf("error code %d: error analizando modo pasivo: %v", ErrPasvMode, err)
+        return C.int(ErrPasvMode)
     }
 
     dataConn, err := net.DialTimeout("tcp", dataAddr, timeout)
     if err != nil {
-        return fmt.Errorf("error code %d: error conexión de datos: %v", ErrConnectionFailed, err)
+        return C.int(ErrConnectionFailed)
     }
     defer dataConn.Close()
     dataConn.SetDeadline(time.Now().Add(timeout))
 
     if _, err = fmt.Fprintf(conn, "STOR %s\r\n", path); err != nil {
-        return fmt.Errorf("error code %d: error iniciando transferencia", ErrStorCommand)
+        return C.int(ErrStorCommand)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "150") {
-        return fmt.Errorf("error code %d: error preparando servidor", ErrDataTransfer)
+        return C.int(ErrDataTransfer)
     }
 
-    normalizedText := strings.ReplaceAll(textData, "\n", "\r\n")
+    normalizedText := strings.ReplaceAll(textStr, "\n", "\r\n")
     _, err = fmt.Fprintf(dataConn, normalizedText)
     if err != nil {
-        return fmt.Errorf("error code %d: error enviando datos: %v", ErrDataTransfer, err)
+        return C.int(ErrDataTransfer)
     }
     dataConn.Close()
 
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "226") {
-        return fmt.Errorf("error code %d: error confirmando transferencia", ErrTransferConfirm)
+        return C.int(ErrTransferConfirm)
     }
 
-    return nil
+    return C.int(0) // Success
 }
 
-func CreateFTPDir(ftpUrl string) error {
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
+//export CreateFTPDir
+func CreateFTPDir(ftpUrl *C.char) C.int {
+    urlStr := C.GoString(ftpUrl)
+    if urlStr == "" {
+        return C.int(ErrEmptyURL)
     }
 
-    if isSFTP(ftpUrl) {
-        return CreateSFTPDir(ftpUrl)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return C.int(ErrSftpConnection)
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := strings.TrimPrefix(u.Path, "/")
+
+        if path == "" {
+            return C.int(ErrMissingPath)
+        }
+
+        // Check if path exists as a file
+        if stat, err := client.Stat(path); err == nil {
+            if !stat.IsDir() {
+                return C.int(ErrFileConflict)
+            }
+            return C.int(1) // Already exists as directory
+        }
+
+        // Create the directory
+        if err := client.MkdirAll(path); err != nil {
+            return C.int(ErrMkdirFailed)
+        }
+
+        return C.int(0) // Success
     }
 
     // Original FTP implementation
-    u, err := url.Parse(ftpUrl)
+    u, err := url.Parse(urlStr)
     if err != nil {
-        return fmt.Errorf("error analizando URL: %v", err)
+        return C.int(ErrEmptyURL)
     }
     if u.Scheme != "ftp" {
-        return fmt.Errorf("error code %d: URL no es FTP", ErrInvalidScheme)
+        return C.int(ErrInvalidScheme)
     }
 
     user := u.User.Username()
@@ -594,16 +743,16 @@ func CreateFTPDir(ftpUrl string) error {
     }
 
     if host == "" || user == "" {
-        return fmt.Errorf("error code %d: falta host o usuario", ErrMissingHostUser)
+        return C.int(ErrMissingHostUser)
     }
 
     if path == "" {
-        return fmt.Errorf("error code %d: falta path del directorio", ErrMissingPath)
+        return C.int(ErrMissingPath)
     }
 
     conn, err := net.DialTimeout("tcp", host, timeout)
     if err != nil {
-        return fmt.Errorf("error code %d: conexión fallida: %v", ErrConnectionFailed, err)
+        return C.int(ErrConnectionFailed)
     }
     defer conn.Close()
     conn.SetDeadline(time.Now().Add(timeout))
@@ -611,80 +760,112 @@ func CreateFTPDir(ftpUrl string) error {
     var buf [1024]byte
     n, err := conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: lectura inicial fallida: %v", ErrInitialRead, err)
+        return C.int(ErrInitialRead)
     }
 
     if _, err = fmt.Fprintf(conn, "USER %s\r\n", user); err != nil {
-        return fmt.Errorf("error code %d: error enviando usuario: %v", ErrUserSend, err)
+        return C.int(ErrUserSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "331") {
-        return fmt.Errorf("error code %d: autenticación de usuario fallida", ErrUserAuth)
+        return C.int(ErrUserAuth)
     }
 
     if _, err = fmt.Fprintf(conn, "PASS %s\r\n", pass); err != nil {
-        return fmt.Errorf("error code %d: error enviando contraseña: %v", ErrPassSend, err)
+        return C.int(ErrPassSend)
     }
     n, err = conn.Read(buf[:])
     if err != nil || !strings.HasPrefix(string(buf[:n]), "230") {
-        return fmt.Errorf("error code %d: autenticación de contraseña fallida", ErrPassAuth)
+        return C.int(ErrPassAuth)
     }
 
-    // Verificar si ya existe como archivo
     if _, err = fmt.Fprintf(conn, "SIZE %s\r\n", path); err != nil {
-        return fmt.Errorf("error code %d: error enviando comando SIZE", ErrSizeCommand)
+        return C.int(ErrSizeCommand)
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: error leyendo respuesta SIZE", ErrSizeResponse)
+        return C.int(ErrSizeResponse)
     }
     sizeResp := string(buf[:n])
     if strings.HasPrefix(sizeResp, "213") {
-        return fmt.Errorf("error code %d: ya existe como archivo (conflicto)", ErrFileConflict)
+        return C.int(ErrFileConflict)
     }
 
-    // Verificar si ya existe como directorio
     if _, err = fmt.Fprintf(conn, "CWD %s\r\n", path); err != nil {
-        return fmt.Errorf("error code %d: error enviando comando CWD", ErrCwdCommand)
+        return C.int(ErrCwdCommand)
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: error leyendo respuesta CWD", ErrCwdResponse)
+        return C.int(ErrCwdResponse)
     }
     cwdResp := string(buf[:n])
     if strings.HasPrefix(cwdResp, "250") {
         // Volver al directorio anterior
         _, _ = fmt.Fprintf(conn, "CDUP\r\n")
-        return nil // Ya existe como directorio
+        return C.int(1) // Ya existe como directorio
     }
 
-    // Crear el directorio
     if _, err = fmt.Fprintf(conn, "MKD %s\r\n", path); err != nil {
-        return fmt.Errorf("error code %d: error enviando comando MKD", ErrMkdirFailed)
+        return C.int(ErrMkdirFailed)
     }
     n, err = conn.Read(buf[:])
     if err != nil {
-        return fmt.Errorf("error code %d: error leyendo respuesta MKD", ErrMkdirResponse)
+        return C.int(ErrMkdirResponse)
     }
     resp := string(buf[:n])
     if !strings.HasPrefix(resp, "257") {
-        return fmt.Errorf("error code %d: error creando directorio", ErrMkdirFailed)
+        return C.int(ErrMkdirFailed)
     }
 
-    return nil
+    return C.int(0) // Success
 }
 
-func ListFTPFiles(dirPath string) []string {
-    if dirPath == "" {
+//export ListFTPFiles
+func ListFTPFiles(dirPath *C.char) **C.char {
+    urlStr := C.GoString(dirPath)
+    if urlStr == "" {
         return nil
     }
 
-    if isSFTP(dirPath) {
-        return ListSFTPFiles(dirPath)
+    if isSFTP(urlStr) {
+        client, err := createSFTPClient(urlStr)
+        if err != nil {
+            return nil
+        }
+        defer client.Close()
+
+        u, _ := url.Parse(urlStr)
+        path := u.Path
+
+        files, err := client.ReadDir(path)
+        if err != nil {
+            return nil
+        }
+
+        var fileNames []string
+        for _, file := range files {
+            fileNames = append(fileNames, file.Name())
+        }
+
+        if len(fileNames) == 0 {
+            return nil
+        }
+
+        // Allocate space for the array plus one extra for NULL terminator
+        cArray := C.malloc(C.size_t(len(fileNames)+1) * C.size_t(unsafe.Sizeof(uintptr(0))))
+        if cArray == nil {
+            return nil
+        }
+        goArray := (*[1<<30 - 1]*C.char)(unsafe.Pointer(cArray))[:len(fileNames)+1:len(fileNames)+1]
+        for i, file := range fileNames {
+            goArray[i] = C.CString(file)
+        }
+        goArray[len(fileNames)] = nil // NULL terminator
+        return (**C.char)(cArray)
     }
 
     // Original FTP implementation
-    u, err := url.Parse(dirPath)
+    u, err := url.Parse(urlStr)
     if err != nil || u.Scheme != "ftp" {
         return nil
     }
@@ -790,241 +971,36 @@ func ListFTPFiles(dirPath string) []string {
         }
     }
 
-    return files
+    if len(files) == 0 {
+        return nil
+    }
+
+    // Allocate space for the array plus one extra for NULL terminator
+    cArray := C.malloc(C.size_t(len(files)+1) * C.size_t(unsafe.Sizeof(uintptr(0))))
+    if cArray == nil {
+        return nil
+    }
+    goArray := (*[1<<30 - 1]*C.char)(unsafe.Pointer(cArray))[:len(files)+1:len(files)+1]
+    for i, file := range files {
+        goArray[i] = C.CString(file)
+    }
+    goArray[len(files)] = nil // NULL terminator
+    return (**C.char)(cArray)
 }
 
-
-
-
-
-
-
-
-
-
-
-func GetSFTPFile(ftpUrl string) string {
-    if ftpUrl == "" {
-        return ""
+//export FreeFTPList
+func FreeFTPList(arr **C.char) {
+    if arr == nil {
+        return
     }
-
-    client, conn, err := createSFTPClient(ftpUrl)
-    if err != nil {
-        return ""
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(ftpUrl)
-    if err != nil {
-        return ""
-    }
-
-    file, err := client.Open(u.Path)
-    if err != nil {
-        return ""
-    }
-    defer file.Close()
-
-    limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
-    var buffer bytes.Buffer
-    if _, err := io.Copy(&buffer, limitedReader); err != nil {
-        return ""
-    }
-
-    if buffer.Len() == 0 {
-        return ""
-    }
-
-    return base64.StdEncoding.EncodeToString(buffer.Bytes())
-}
-
-func GetSFTPText(ftpUrl string) string {
-    if ftpUrl == "" {
-        return ""
-    }
-
-    client, conn, err := createSFTPClient(ftpUrl)
-    if err != nil {
-        return ""
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(ftpUrl)
-    if err != nil {
-        return ""
-    }
-
-    file, err := client.Open(u.Path)
-    if err != nil {
-        return ""
-    }
-    defer file.Close()
-
-    limitedReader := &io.LimitedReader{R: file, N: maxFileSize}
-    var buffer bytes.Buffer
-    if _, err := io.Copy(&buffer, limitedReader); err != nil {
-        return ""
-    }
-
-    if buffer.Len() == 0 {
-        return ""
-    }
-
-    text := buffer.String()
-    text = strings.ReplaceAll(text, "\r\n", "\n")
-    return strings.TrimSpace(text)
-}
-
-func PutSFTPFile(base64Data, ftpUrl string) error {
-    if base64Data == "" {
-        return fmt.Errorf("error code %d: datos vacíos", ErrEmptyData)
-    }
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
-    }
-
-    data, err := base64.StdEncoding.DecodeString(base64Data)
-    if err != nil {
-        return fmt.Errorf("error decodificando base64: %v", err)
-    }
-
-    client, conn, err := createSFTPClient(ftpUrl)
-    if err != nil {
-        return err
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(ftpUrl)
-    if err != nil {
-        return err
-    }
-
-    dir := filepath.Dir(u.Path)
-    if dir != "." {
-        if err := client.MkdirAll(dir); err != nil {
-            return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
+    for i := 0; ; i++ {
+        p := *(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(arr)) + uintptr(i)*unsafe.Sizeof(*arr)))
+        if p == nil {
+            break
         }
+        C.free(unsafe.Pointer(p))
     }
-
-    file, err := client.Create(u.Path)
-    if err != nil {
-        return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
-    }
-    defer file.Close()
-
-    if _, err := file.Write(data); err != nil {
-        return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
-    }
-
-    return nil
+    C.free(unsafe.Pointer(arr))
 }
 
-func PutSFTPText(textData, ftpUrl string) error {
-    if textData == "" {
-        return fmt.Errorf("error code %d: texto vacío", ErrEmptyData)
-    }
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
-    }
-
-    client, conn, err := createSFTPClient(ftpUrl)
-    if err != nil {
-        return err
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(ftpUrl)
-    if err != nil {
-        return err
-    }
-
-    dir := filepath.Dir(u.Path)
-    if dir != "." {
-        if err := client.MkdirAll(dir); err != nil {
-            return fmt.Errorf("error code %d: failed to create directories: %v", ErrSftpOperation, err)
-        }
-    }
-
-    file, err := client.Create(u.Path)
-    if err != nil {
-        return fmt.Errorf("error code %d: failed to create file: %v", ErrSftpOperation, err)
-    }
-    defer file.Close()
-
-    normalizedText := strings.ReplaceAll(strings.ReplaceAll(textData, "\r\n", "\n"), "\n", "\r\n")
-    if _, err := fmt.Fprint(file, normalizedText); err != nil {
-        return fmt.Errorf("error code %d: failed to write file: %v", ErrSftpOperation, err)
-    }
-
-    return nil
-}
-
-func CreateSFTPDir(ftpUrl string) error {
-    if ftpUrl == "" {
-        return fmt.Errorf("error code %d: URL vacía", ErrEmptyURL)
-    }
-
-    client, conn, err := createSFTPClient(ftpUrl)
-    if err != nil {
-        return err
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(ftpUrl)
-    if err != nil {
-        return err
-    }
-
-    path := strings.TrimPrefix(u.Path, "/")
-    if path == "" {
-        return fmt.Errorf("error code %d: falta path del directorio", ErrMissingPath)
-    }
-
-    if stat, err := client.Stat(path); err == nil {
-        if !stat.IsDir() {
-            return fmt.Errorf("error code %d: ya existe como archivo (conflicto)", ErrFileConflict)
-        }
-        return nil
-    }
-
-    if err := client.MkdirAll(path); err != nil {
-        return fmt.Errorf("error code %d: error creando directorio: %v", ErrMkdirFailed, err)
-    }
-
-    return nil
-}
-
-func ListSFTPFiles(dirPath string) []string {
-    if dirPath == "" {
-        return nil
-    }
-
-    client, conn, err := createSFTPClient(dirPath)
-    if err != nil {
-        return nil
-    }
-    defer client.Close()
-    defer conn.Close()
-
-    u, err := url.Parse(dirPath)
-    if err != nil {
-        return nil
-    }
-
-    files, err := client.ReadDir(u.Path)
-    if err != nil {
-        return nil
-    }
-
-    var fileNames []string
-    for _, file := range files {
-        fileNames = append(fileNames, file.Name())
-    }
-
-    return fileNames
-}
+func main() {}
