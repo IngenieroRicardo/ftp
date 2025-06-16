@@ -8,8 +8,8 @@ Compilada usando: `go build -o ftp.dll -buildmode=c-shared ftp.go`
 
 | Linux | Windows |
 | --- | --- |
-| `wget https://github.com/IngenieroRicardo/ftp/releases/download/2.0/ftp.so` | `Invoke-WebRequest https://github.com/IngenieroRicardo/ftp/releases/download/2.0/ftp.dll -Outftp ./ftp.dll` |
-| `wget https://github.com/IngenieroRicardo/ftp/releases/download/2.0/ftp.h` | `Invoke-WebRequest https://github.com/IngenieroRicardo/ftp/releases/download/2.0/ftp.h -Outftp ./ftp.h` |
+| `wget https://github.com/IngenieroRicardo/ftp/releases/download/3.1/ftp.so` | `Invoke-WebRequest https://github.com/IngenieroRicardo/ftp/releases/download/3.1/ftp.dll -Outftp ./ftp.dll` |
+| `wget https://github.com/IngenieroRicardo/ftp/releases/download/3.1/ftp.h` | `Invoke-WebRequest https://github.com/IngenieroRicardo/ftp/releases/download/3.1/ftp.h -Outftp ./ftp.h` |
 
 ---
 
